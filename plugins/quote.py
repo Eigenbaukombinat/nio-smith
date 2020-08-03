@@ -198,7 +198,7 @@ async def quote_command(command):
         # TODO: check if this needs fixing
         quotes = dict(filter(lambda item: not item[1].deleted, quotes.items()))
     except KeyError:
-        await plugin.reply_notice(command, "Error: no quotes stored")
+        await plugin.reply_notice(command, "Error: no quotes stored. See `help quote` how to use quote")
         return False
 
     quote_id: int
