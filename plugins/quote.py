@@ -4,7 +4,8 @@ from plugin import Plugin
 from typing import Dict, List, Tuple
 import time
 import random
-from re import compile
+import re
+from shlex import split
 
 import logging
 logger = logging.getLogger(__name__)
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 quote_attributes: List[str] = ["user", "members"]
 """valid attributes to select quotes by"""
 
-
+current_version: int = 2
 plugin = Plugin("quote", "General", "Store (more or less) funny quotes and access them randomly or by search term")
 
 
@@ -28,7 +29,24 @@ def setup():
     plugin.add_command("quote_del", quote_delete_command, "Delete a quote (can be restored)")
     plugin.add_command("quote_restore", quote_restore_command, "Restore a quote")
     plugin.add_command("quote_links", quote_links_command, "Toggle automatic nickname linking")
+    plugin.add_command("quote_replace", quote_replace_command, "Replace a specific quote with the supplied text - destructive, can not be reverted")
+    plugin.add_command("quote_upgrade", upgrade_quotes, "Upgrade all Quotes to the most recent version")
     plugin.add_hook("m.reaction", quote_add_reaction)
+
+
+class QuoteLine:
+
+    def __init__(self, nick: str, message: str, message_type: str = "message"):
+        """
+        A specific line of a quote
+        :param nick: the person's nickname
+        :param message: the actual message
+        :param message_type: type of the quote, currently either "message" or "action"
+        """
+
+        self.nick: str = nick
+        self.message: str = message
+        self.message_type: str = message_type
 
 
 class Quote:
@@ -36,7 +54,8 @@ class Quote:
     def __init__(self, quote_type: str = "local", text: str = "", url: str = "",
                  channel: str = "", mxroom: str = "",
                  user: str = "", mxuser: str = "",
-                 date: float = time.time()
+                 date: float = time.time(),
+                 lines: List[QuoteLine] = [],
                  ):
         """
         A textual quote and all its parameters
@@ -47,6 +66,7 @@ class Quote:
         :param mxroom: matrix room id
         :param user: (legacy) IRC-username of the user who added the quote
         :param mxuser: matrix username of the user who added the quote
+        :param lines: text of the quote in separate lines
         """
 
         try:
@@ -63,6 +83,8 @@ class Quote:
         self.mxroom: str = mxroom
         self.user: str = user
         self.mxuser: str = mxuser
+        self.version: int = current_version
+        self.lines: List[QuoteLine] = lines
 
         self.deleted: bool = False
         """Flag to mark a quote as deleted"""
@@ -82,30 +104,44 @@ class Quote:
         :return: the textual representation of the quote
         """
 
-        quote_text: str = self.text
-        """pre nick-detection cleanup"""
-        quote_text = quote_text.replace("<@", "<")
-        quote_text = quote_text.replace("<+", "<")
+        quote_text: str = ""
+        if self.get_version() < 2:
+            quote_text = self.text
+            """pre nick-detection cleanup"""
+            quote_text = quote_text.replace("<@", "<")
+            quote_text = quote_text.replace("<+", "<")
 
-        """try to find nicknames"""
-        p = compile(r'<(\S+)>')
-        nick_list: List[str] = p.findall(quote_text)
+            """try to find nicknames"""
+            p = re.compile(r'<(\S+)>')
+            nick_list: List[str] = p.findall(quote_text)
 
-        """replace problematic characters with their html-representation"""
-        quote_text = quote_text.replace("<", "&lt;")
-        quote_text = quote_text.replace(">", "&gt;")
-        quote_text = quote_text.replace("`", "&#96;")
+            """replace problematic characters with their html-representation"""
+            quote_text = quote_text.replace("<", "&lt;")
+            quote_text = quote_text.replace(">", "&gt;")
+            quote_text = quote_text.replace("`", "&#96;")
 
-        """matrix allows us to display quotes as multiline-messages :)"""
-        quote_text = quote_text.replace(" | ", "  \n")
+            """matrix allows us to display quotes as multiline-messages :)"""
+            quote_text = quote_text.replace(" | ", "  \n")
 
-        """optionally replace nicknames by userlinks"""
-        if plugin.read_data("nick_links"):
-            nick: str
-            nick_link: str
-            for nick in nick_list:
-                if nick_link := await plugin.link_user(command, nick, strictness="fuzzy", fuzziness=55):
-                    quote_text = quote_text.replace(f"&lt;{nick}&gt;", nick_link)
+            """optionally replace nicknames by userlinks"""
+            if plugin.read_data("nick_links"):
+                nick: str
+                nick_link: str
+                for nick in nick_list:
+                    if nick_link := await plugin.link_user(command, nick, strictness="fuzzy", fuzziness=55):
+                        quote_text = quote_text.replace(f"&lt;{nick}&gt;", nick_link)
+
+        else:
+            line: QuoteLine
+            for line in self.lines:
+                if plugin.read_data("nick_links"):
+                    nick_link: str
+                    if nick_link := await plugin.link_user(command, line.nick, strictness="fuzzy", fuzziness=80):
+                        quote_text += f"{nick_link} {line.message}  \n"
+                    else:
+                        quote_text += f"&lt;{line.nick}&gt; {line.message}  \n"
+                else:
+                    quote_text += f"&lt;{line.nick}&gt; {line.message}  \n"
 
         reactions_text: str = ""
         for reaction, count in self.reactions.items():
@@ -141,7 +177,8 @@ class Quote:
         for search_term in search_terms:
             if search_term.lower() not in self.text.lower():
                 return False
-        return True
+        else:
+            return True
 
     async def quote_add_reaction(self, reaction: str):
         """
@@ -154,6 +191,61 @@ class Quote:
             self.reactions[reaction] += 1
         else:
             self.reactions[reaction] = 1
+
+    def get_version(self) -> int:
+        """
+        Returns the current version of the quote
+        :return: current version of the quote
+        """
+
+        try:
+            return self.version
+        except AttributeError:
+            return 0
+
+    def upgrade(self):
+        """
+        Upgrade a quote to the most recent version
+        :return:
+        """
+
+        # Version 0 to current
+        if self.get_version() < current_version:
+            self.convert_string_to_quote_lines()
+            if self.lines and len(self.lines) > 0:
+                self.version = current_version
+                return True
+            else:
+                return False
+
+    def convert_string_to_quote_lines(self):
+        """
+        Convert the textual quote string to separate lines
+        :return:
+        """
+
+        # split text into lines
+        full_lines: List[str] = re.split('\r\n?|\n| [|] ', self.text)
+        quote_lines: List[QuoteLine] = []
+
+        for line in full_lines:
+            nick: str
+            message: str
+            message_type: str
+
+            if line != "":
+                if line[0] == '*':
+                    message_type = "action"
+                    nick = line.split(' ')[1]
+                    message = ' '.join(line.split(' ')[2:])
+                else:
+                    message_type = "message"
+                    nick = line.split(' ')[0].replace('<', '').replace('>', '')
+                    message = ' '.join(line.split(' ')[1:])
+
+                quote_lines.append(QuoteLine(nick, message, message_type))
+
+        self.lines = quote_lines
 
 
 class TrackedQuote:
@@ -227,23 +319,17 @@ async def quote_command(command):
 
         if command.args[-1].isdigit():
             """check if a specific match is requested"""
-            terms = command.args[:-1]
+            # list of search terms, keeping quoted substrings
+            terms = split(" ".join(command.args[:-1]))
             match_id = int(command.args[-1])
-            try:
-                (quote_object, match_index, total_matches) = await find_quote_by_search_term(quotes, terms, match_id)
-            except TypeError:
-                quote_object = None
-
         else:
-            terms = command.args
-            try:
-                (quote_object, match_index, total_matches) = await find_quote_by_search_term(quotes, terms)
-            except TypeError:
-                quote_object = None
+            terms = split(" ".join(command.args))
+            match_id = 0
 
-        if quote_object:
+        try:
+            (quote_object, match_index, total_matches) = await find_quote_by_search_term(quotes, terms, match_id)
             await post_quote(command, quote_object, match_index, total_matches)
-        else:
+        except TypeError:
             await plugin.reply_notice(command, f"No quote found matching {terms}")
 
 
@@ -265,7 +351,7 @@ async def post_quote(command, quote_object: Quote, match_index: int = -1, total_
         event_id = await plugin.reply_notice(command, f"{await quote_object.display_text(command)}")
 
     """store the event id of the message to allow for tracking reactions to the last 100 posted quotes"""
-    tracked_quotes: List[TrackedQuote] = []
+    tracked_quotes: List[TrackedQuote]
     try:
         tracked_quotes = plugin.read_data("tracked_quotes")
         while len(tracked_quotes) > 100:
@@ -352,18 +438,84 @@ async def quote_add_command(command):
     """
 
     if len(command.args) > 0:
-        quotes: Dict[int, Quote]
-        try:
-            quotes = plugin.read_data("quotes")
-        except KeyError:
-            quotes = {}
-        quote_text: str = " ".join(command.args)
-        new_quote: Quote = Quote("local", text=quote_text, mxroom=command.room.room_id)
-        quotes[new_quote.id] = new_quote
-        plugin.store_data("quotes", quotes)
-        await plugin.reply_notice(command, f"Quote {new_quote.id} added")
+        quote: Quote = await quote_add_or_replace(command)
+        await plugin.reply_notice(command, f"Quote {quote.id} added")
     else:
         await plugin.reply_notice(command, "Usage: quote_add <quote_text>")
+
+
+async def quote_replace_command(command):
+    """
+    Replace a quote
+    :param command:
+    :return:
+    """
+
+    if len(command.args) > 2 and re.match(r'\d+', command.args[0]) and int(command.args[0]) in plugin.read_data("quotes").keys():
+        old_quote_text: str = await plugin.read_data("quotes")[int(command.args[0])].display_text(command)
+        quote: Quote = await quote_add_or_replace(command, int(command.args[0]))
+        await plugin.reply_notice(command, f"Quote {quote.id} replaced  \n"
+                                           f"**Old:**  \n"
+                                           f"{old_quote_text}  \n\n"
+                                           f"**New:**  \n"
+                                           f"{await quote.display_text(command)}")
+    else:
+        await plugin.reply_notice(command, "Usage: quote_replace <quote_id> <quote_text>")
+
+
+async def quote_add_or_replace(command, quote_id: int = 0) -> Quote or None:
+    """
+
+    :param command:
+    :param quote_id: optional quote_id to replace an existing quote
+    :return: added quote_object or None
+    """
+
+    quotes: Dict[int, Quote]
+    try:
+        quotes = plugin.read_data("quotes")
+    except KeyError:
+        quotes = {}
+
+    quote_text: str = ""
+    new_quote: Quote
+
+    # try to guess formatting
+    if command.command.find(' | ') != -1:
+        # assume irc-formatting
+        quote_text: str
+        if quote_id != 0:
+            quote_text = " ".join(command.args[1:])
+        else:
+            quote_text = " ".join(command.args)
+        new_quote: Quote = Quote("local", text=quote_text, mxroom=command.room.room_id)
+        new_quote.convert_string_to_quote_lines()
+
+    else:
+        # assume matrix c&p
+        # strip command name
+        lines: List[str] = command.command.split(' ', 1)[1].split('\n')
+        if quote_id != 0:
+            # strip quote from nickname
+            lines[0] = lines[0].strip(f"{str(quote_id)} ")
+        index: int = 0
+        quote_lines: List[QuoteLine] = []
+        while index < len(lines)-1:
+            quote_lines.append(QuoteLine(lines[index], lines[index+1]))
+            quote_text += f"<{lines[index]}> {lines[index+1]} | "
+            index += 2
+        quote_text = quote_text.rstrip(' | ')
+        new_quote = Quote("local", text=quote_text, mxroom=command.room.room_id, lines=quote_lines)
+
+    if quote_id == 0:
+        quotes[new_quote.id] = new_quote
+        plugin.store_data("quotes", quotes)
+        return quotes[new_quote.id]
+    else:
+        quotes[quote_id].lines = new_quote.lines
+        quotes[quote_id].text = new_quote.text
+        plugin.store_data("quotes", quotes)
+        return quotes[quote_id]
 
 
 async def quote_delete_command(command):
@@ -476,5 +628,34 @@ async def quote_add_reaction(client: AsyncClient, room_id: str, event: UnknownEv
         quotes[quote_id] = quote_object
         plugin.store_data("quotes", quotes)
 
+
+async def upgrade_quotes(command):
+    """
+    Upgrade all quotes to the most recent version
+    :return:
+    """
+
+    quotes: Dict[int, Quote]
+    try:
+        quotes = plugin.read_data("quotes")
+
+    except KeyError:
+        quotes = {}
+
+    upgraded_quotes: int = 0
+    upgrade_successful: bool = True
+    for quote in quotes.values():
+        if quote.get_version() < current_version:
+            if not quote.upgrade():
+                upgrade_successful = False
+            else:
+                upgraded_quotes += 1
+
+    if upgrade_successful:
+        plugin.store_data("quotes", quotes)
+        plugin.store_data("store_version", current_version)
+        await plugin.reply_notice(command, f"Success: upgraded {upgraded_quotes} of {len(quotes)} Quotes to Version {current_version}")
+    else:
+        await plugin.reply_notice(command, f"Error: upgraded {upgraded_quotes} of {len(quotes)} Quotes to Version {current_version}")
 
 setup()
