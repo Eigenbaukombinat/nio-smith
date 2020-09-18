@@ -58,6 +58,15 @@ Currently included plugins consist mostly of pretty silly, mostly semi-useful st
 - [matrix-nio](https://matrix-nio.readthedocs.io/en/latest/nio.html) with end-to-end-encryption enabled
 - [fuzzywuzzy](https://github.com/seatgeek/fuzzywuzzy) for fuzzy command matching and nick linking (yes, it's worth it)
 
+## Installation
+
+- clone this repository to a folder (for example nio-smith)
+- create a python virtualenv in that folder `python -m venv nio-smith`
+- change to the folder that was created before (for example nio-smith)
+- install required librarys via pip `bin/pip install -r requirements.txt`
+- rename sample.config.yaml to config.yaml and change the settings in the config file
+- run `bin/python main.py` to start the bot  
+
 ### Current plugin 3rd party requirements
 - `sonarr`: [requests](https://pypi.org/project/requests/) to query sonarr's API
 - `translate`: [googletrans](https://pypi.org/project/googletrans/) to provide language detection and translation
